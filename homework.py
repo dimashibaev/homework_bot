@@ -35,6 +35,7 @@ logging.basicConfig(
     ]
 )
 
+
 def check_tokens():
     """Проверяет наличие всех обязательных переменных окружения."""
     if not PRACTICUM_TOKEN:
@@ -76,15 +77,18 @@ def check_response(response):
     if not isinstance(response, dict):
         raise TypeError('Ожидался словарь в ответе API.')
     if 'homeworks' not in response:
-        raise APIResponseFormatError('Отсутствует ключ "homeworks" в ответе API.')
+        raise APIResponseFormatError(
+            'Отсутствует ключ "homeworks" в ответе API.')
     if 'current_date' not in response:
-        raise APIResponseFormatError('Отсутствует ключ "current_date" в ответе API.')
+        raise APIResponseFormatError(
+            'Отсутствует ключ "current_date" в ответе API.')
     homeworks = response.get('homeworks')
     current_date = response.get('current_date')
     if not isinstance(homeworks, list):
         raise TypeError('"homeworks" должен быть списком.')
     if not isinstance(current_date, int):
-        raise APIResponseFormatError('"current_date" должен быть целым числом.')
+        raise APIResponseFormatError(
+            '"current_date" должен быть целым числом.')
     return homeworks
 
 
@@ -122,7 +126,9 @@ def main():
             else:
                 logging.debug('Новых статусов нет.')
             timestamp = response.get('current_date', timestamp)
-        except (APIRequestError, APIResponseFormatError, StatusUnknownError) as error:
+        except (
+            APIRequestError, APIResponseFormatError, StatusUnknownError
+        ) as error:
             message = f'Сбой в работе программы: {error}'
             logging.error(message)
             send_message(bot, message)
