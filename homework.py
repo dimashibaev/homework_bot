@@ -1,5 +1,6 @@
 import logging
 import os
+import sys
 import time
 
 import requests
@@ -26,24 +27,22 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s, %(levelname)s, %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('program.log', mode='w', encoding='utf-8')
-    ]
-)
-
 
 def check_tokens():
     """Проверяет наличие всех обязательных переменных окружения."""
-    if not PRACTICUM_TOKEN:
-        raise TokenMissingError('Отсутствует переменная PRACTICUM_TOKEN')
-    if not TELEGRAM_TOKEN:
-        raise TokenMissingError('Отсутствует переменная TELEGRAM_TOKEN')
-    if not TELEGRAM_CHAT_ID:
-        raise TokenMissingError('Отсутствует переменная TELEGRAM_CHAT_ID')
+    required_tokens = (
+        ('PRACTICUM_TOKEN', PRACTICUM_TOKEN),
+        ('TELEGRAM_TOKEN', TELEGRAM_TOKEN),
+        ('TELEGRAM_CHAT_ID', TELEGRAM_CHAT_ID)
+    )
+    missing = []
+    for name, token in required_tokens:
+        if not token:
+            logging.critical(f'Переменная {name} отсутствует.')
+            missing.append(name)
+    if missing:
+        raise TokenMissingError(
+            f'Отсутствуют переменные: {", ".join(missing)}')
 
 
 def send_message(bot, message):
@@ -52,43 +51,42 @@ def send_message(bot, message):
         logging.info('Начинаю отправку сообщения в Telegram...')
         bot.send_message(TELEGRAM_CHAT_ID, message)
         logging.debug(f'Сообщение отправлено: {message}')
-    except ApiTelegramException as error:
-        logging.error(f'Ошибка при отправке сообщения: {error}')
+        return True
+    except (ApiTelegramException, requests.RequestException) as error:
+        raise APIRequestError(f'Ошибка отправки сообщения: {error}')
 
 
 def get_api_answer(timestamp):
     """Запрашивает данные с API Практикума."""
     params = {'from_date': timestamp}
+    log_msg = (
+        'Запрос к {url} с заголовками {headers} и параметрами {params}'
+    ).format(url=ENDPOINT, headers=HEADERS, params=params)
+    logging.info(log_msg)
     try:
         response = requests.get(ENDPOINT, headers=HEADERS, params=params)
-        if response.status_code != 200:
-            raise APIRequestError(
-                f'Ошибка при запросе к API: статус {response.status_code}, '
-                f'ответ: {response.text}'
-            )
-        return response.json()
     except requests.RequestException as error:
-        logging.error(f'Ошибка соединения с API: {error}')
-        raise APIRequestError(f'Сбой при запросе к API: {error}')
+        raise APIRequestError(f'Ошибка запроса к API: {error}')
+    if response.status_code != requests.codes.ok:
+        raise APIRequestError(
+            f'Ошибка ответа API: {response.status_code}, {response.text}'
+        )
+    return response.json()
 
 
 def check_response(response):
     """Проверяет структуру ответа API."""
     if not isinstance(response, dict):
-        raise TypeError('Ожидался словарь в ответе API.')
+        raise TypeError(
+            f'Ожидался словарь в ответе API, получено {type(response)}'
+        )
     if 'homeworks' not in response:
-        raise APIResponseFormatError(
-            'Отсутствует ключ "homeworks" в ответе API.')
-    if 'current_date' not in response:
-        raise APIResponseFormatError(
-            'Отсутствует ключ "current_date" в ответе API.')
-    homeworks = response.get('homeworks')
-    current_date = response.get('current_date')
+        raise APIResponseFormatError('Отсутствует ключ "homeworks".')
+    homeworks = response['homeworks']
     if not isinstance(homeworks, list):
-        raise TypeError('"homeworks" должен быть списком.')
-    if not isinstance(current_date, int):
-        raise APIResponseFormatError(
-            '"current_date" должен быть целым числом.')
+        raise TypeError(
+            f'"homeworks" должен быть списком, получено {type(homeworks)}'
+        )
     return homeworks
 
 
@@ -106,39 +104,47 @@ def parse_status(homework):
 
 def main():
     """Основной цикл работы бота."""
-    try:
-        check_tokens()
-    except TokenMissingError as error:
-        logging.critical(f'Критическая ошибка: {error}')
-        raise
-
+    check_tokens()
     bot = TeleBot(TELEGRAM_TOKEN)
     timestamp = int(time.time())
+    last_message = ''
 
     while True:
         try:
             response = get_api_answer(timestamp)
             homeworks = check_response(response)
             if homeworks:
-                for homework in homeworks:
-                    message = parse_status(homework)
-                    send_message(bot, message)
+                homework = homeworks[0]
+                message = parse_status(homework)
+                if send_message(bot, message):
+                    timestamp = response.get('current_date', timestamp)
+                    last_message = ''
             else:
                 logging.debug('Новых статусов нет.')
-            timestamp = response.get('current_date', timestamp)
-        except (
-            APIRequestError, APIResponseFormatError, StatusUnknownError
-        ) as error:
+        except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logging.error(message)
-            send_message(bot, message)
-        except Exception as error:
-            message = f'Неизвестная ошибка: {error}'
-            logging.error(message)
-            send_message(bot, message)
+            if message != last_message:
+                try:
+                    send_message(bot, message)
+                except Exception as send_err:
+                    logging.error(
+                        f'Ошибка при отправке в Telegram: {send_err}')
+                last_message = message
         finally:
             time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
-    main()
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s, %(levelname)s, %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler('program.log', mode='w', encoding='utf-8')
+        ]
+    )
+    try:
+        main()
+    except Exception as e:
+        logging.critical(f'Критическая ошибка: {e}')
